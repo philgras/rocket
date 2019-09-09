@@ -2,62 +2,70 @@
 // Created by philgras on 04.09.19.
 //
 
-#ifndef LUNA_FILE_DESCRIPTOR_HPP
-#define LUNA_FILE_DESCRIPTOR_HPP
+#ifndef ROCKET_FILE_DESCRIPTOR_HPP
+#define ROCKET_FILE_DESCRIPTOR_HPP
 
 #include <system_error>
 #include <unistd.h>
 
-namespace luna {
 
-    class FileDescriptor {
+namespace rocket {
 
-    public:
+class file_descriptor {
 
-        constexpr int INVALID_FD = -1;
+public:
 
-        explicit FileDescriptor(int fd)
-                : fd(fd) {}
+    static constexpr int INVALID_FD = -1;
 
-        FileDescriptor(const FileDescriptor &) = delete;
+    explicit file_descriptor(int fd)
+            : m_fd(fd) {}
 
-        FileDescriptor &operator=(const FileDescriptor &) = delete;
+    file_descriptor(const file_descriptor &) = delete;
 
-        virtual ~FileDescriptor() {
-            silent_close();
-        }
+    file_descriptor &operator=(const file_descriptor &) = delete;
 
-        void on_io_event(uint32_t events){
-            // to be filled by subclasses
-        }
+    virtual ~file_descriptor() {
+        silent_close();
+    }
 
-        int get_fd() const { return this->fd; }
+    int get_fd() const { return m_fd; }
 
-        void close() {
-            int rc;
-            if (this->fd != INVALID_FD) {
-                rc = ::close(this->fd);
-                this->fd = INVALID_FD;
+    void close() {
+        int rc;
+        if (m_fd != INVALID_FD) {
+            rc = ::close(m_fd);
+            m_fd = INVALID_FD;
 
-                if (rc) {
-                    throw std::system_error(rc, std::system_category());
-                }
+            if (rc) {
+                throw std::system_error(rc, std::system_category());
             }
         }
+    }
 
 
-    private:
+private:
 
-        void silent_close() noexcept {
-            if (this->fd != INVALID_FD) {
-                ::close(this->fd);
-            }
+    void silent_close() noexcept {
+        if (m_fd != INVALID_FD) {
+            ::close(m_fd);
         }
+    }
 
-        int fd;
+    int m_fd;
 
-    };
+};
+
+
+class async_descriptor : public file_descriptor {
+    
+public:
+    
+    using file_descriptor::file_descriptor;
+    
+    virtual void on_io_event(uint32_t events) = 0;
+
+};
 
 }
 
-#endif //LUNA_FILE_DESCRIPTOR_HPP
+#endif //ROCKET_FILE_DESCRIPTOR_HPP
