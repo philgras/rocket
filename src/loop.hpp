@@ -1,74 +1,81 @@
 #ifndef ROCKET_LOOP_HPP
 #define ROCKET_LOOP_HPP
 
+#include "event.hpp"
 #include "file_descriptor.hpp"
+#include "sync_queue.hpp"
 
 #include <unordered_map>
 #include <memory>
+#include <utility>
+#include <atomic>
 #include <mutex>
-#include <shared_mutex>
-#include <cstdint>
-
-#include <sys/epoll.h>
 
 
 namespace rocket {
 
 
-enum io_events : uint32_t { 
-    IN = EPOLLIN,
-    OUT = EPOLLOUT,
-    RDHUP = EPOLLRDHUP,
-    HUP = EPOLLHUP,
-    ERR = EPOLLERR,
-    PRI = EPOLLPRI,
-//  ONESHOT = EPOLLONESHOT,
-    ET = EPOLLET,
-    EXCLUSIVE = EPOLLEXCLUSIVE
-};
+    class io_loop {
 
+    public:
 
-class async_descriptor : public file_descriptor {
+        io_loop(int max_ready_events=48);
 
-public:
+        io_loop(const io_loop &) = delete;
 
-    async_descriptor(int fd, io_events events)
-        : file_descriptor(fd), m_events(events){ }
+        io_loop operator=(const io_loop &) = delete;
 
-    virtual void on_io_event(io_events events) = 0;
+        void start();
 
-    io_events get_io_events() const { return m_events; }
+        void request_add(const std::shared_ptr<async_descriptor> &descriptor) {
+            m_add_queue.push(descriptor);
+            m_wakeup_notifier->write(1);
+        }
 
-private:
+        void request_removal(const std::shared_ptr<async_descriptor> &descriptor) {
+            m_remove_queue.push(descriptor);
+            m_wakeup_notifier->write(1);
+        }
 
-    io_events m_events;
-    std::mutex m_mutex;
+        void request_shutdown() {
+            bool expected = false;
+            if(m_request_shutdown.compare_exchange_strong(expected, true)){
+                m_wakeup_notifier->write(1);
+            }
+        }
 
-};
+        void clear_requests() {
+            m_add_queue.clear();
+            m_remove_queue.clear();
+            m_request_shutdown = false;
+        }
 
+    private:
 
-class io_loop {
+        void add(const std::shared_ptr<async_descriptor> &);
 
-public:
+        void remove(const std::shared_ptr<async_descriptor> &);
 
-    io_loop(int max_ready_events, int wait_timeout);
+        int check_timeout();
 
-    void add_file_descriptor(std::shared_ptr<async_descriptor>&); 
+        void call_handler(const std::shared_ptr<async_descriptor> &, io_events, lifecycle_events);
 
-    void remove_file_descriptor(std::shared_ptr<async_descriptor>&);
+        bool is_registered(const std::shared_ptr<async_descriptor> & fd_ptr){
+            return m_registered_fds.find(fd_ptr->get_fd()) != m_registered_fds.end();
+        }
 
-    void start();
+        file_descriptor m_epoll_fd;
+        std::unordered_map<int, std::shared_ptr<async_descriptor>> m_registered_fds;
+        sync_queue<std::shared_ptr<async_descriptor>> m_add_queue;   // queue to schedule add-tasks
+        sync_queue<std::shared_ptr<async_descriptor>> m_remove_queue;  // queue to schedule remove-tasks
 
-    void stop();
+        int m_max_ready_events;
 
-private:
-    std::unordered_map<int, std::shared_ptr<async_descriptor>> registered_fds;
-    std::shared_mutex m_mapmutex;
-    file_descriptor epoll_fd;
-    int max_ready_events;
-    int wait_timeout;
+        std::shared_ptr<notify_descriptor> m_wakeup_notifier;
+        std::atomic_bool m_request_shutdown;
+        std::mutex m_start_mutex;
 
-};
+    };
 
 
 }
