@@ -49,8 +49,8 @@ namespace rocket {
                 rc = ::close(m_fd);
                 m_fd = INVALID_FD;
 
-                if (rc && throw_on_error) {
-                    throw std::system_error(rc, std::system_category());
+                if (rc == -1 && throw_on_error) {
+                    throw std::system_error(errno, std::system_category());
                 }
             }
         }
@@ -72,7 +72,7 @@ namespace rocket {
     class async_descriptor : public file_descriptor {
     public:
 
-        explicit async_descriptor(int fd, const std::shared_ptr<event_handler> &handler,
+        async_descriptor(int fd, const std::shared_ptr<event_handler> &handler,
                                   std::chrono::milliseconds timeout = INFINITE_TIMEOUT)
                 : file_descriptor(fd), m_handler(handler), m_timeout(timeout) {
 

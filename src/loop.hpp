@@ -4,6 +4,7 @@
 #include "event.hpp"
 #include "file_descriptor.hpp"
 #include "sync_queue.hpp"
+#include "notification.hpp"
 
 #include <unordered_map>
 #include <memory>
