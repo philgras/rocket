@@ -45,17 +45,14 @@ public:
 
   virtual void on_timeout(io_loop &, const std::shared_ptr<async_descriptor> &);
 
-  virtual void on_added(io_loop &, const std::shared_ptr<async_descriptor> &) {}
+  virtual void on_added(io_loop &,
+                        const std::shared_ptr<async_descriptor> &) = 0;
 
   virtual void on_removed(io_loop &, const std::shared_ptr<async_descriptor> &);
 
   virtual void on_exception(io_loop &,
                             const std::shared_ptr<async_descriptor> &fd_ptr,
-                            const std::exception_ptr &e_ptr) {
-    if (e_ptr) {
-      std::rethrow_exception(e_ptr);
-    }
-  }
+                            const std::exception_ptr &e_ptr);
 
   virtual void on_io_error(io_loop &,
                            const std::shared_ptr<async_descriptor> &);
@@ -63,7 +60,7 @@ public:
   virtual void on_hungup(io_loop &, const std::shared_ptr<async_descriptor> &);
 
   virtual void on_read_hungup(io_loop &,
-                              const std::shared_ptr<async_descriptor> &);
+                              const std::shared_ptr<async_descriptor> &) = 0;
 
   virtual void on_io(io_loop &, const std::shared_ptr<async_descriptor> &,
                      bool read, bool write) = 0;

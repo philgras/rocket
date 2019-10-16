@@ -1,9 +1,13 @@
 #ifndef ROCKET_SOCKET_HPP
 #define ROCKET_SOCKET_HPP
 
+#include "event.hpp"
 #include "file_descriptor.hpp"
+#include "io_loop.hpp"
+
 #include <cerrno>
 #include <cstring>
+#include <iostream>
 #include <system_error>
 #include <vector>
 
@@ -209,10 +213,10 @@ private:
   std::unique_ptr<std::pair<socklen_t, sockaddr_storage>> m_addr_cache;
 };
 
-template <typename handler_type, typename accepted_handler_type>
+template <typename handler_type>
 class stream_listener : public socket_descriptor<handler_type> {
 public:
-  using connection_type = stream_connection<accepted_handler_type>;
+  using connection_type = typename handler_type::connection_type;
 
   stream_listener(const sockaddr *addr, socklen_t addr_len, int max_conns,
                   std::chrono::milliseconds timeout = INFINITE_TIMEOUT,
@@ -270,5 +274,48 @@ private:
   int m_max_conns;
   std::chrono::milliseconds m_timeout_accepted;
 };
+
+template <typename subclass_type, typename connection_handler_type>
+class accept_handler : public event_handler {
+public:
+  using connection_type = stream_connection<connection_handler_type>;
+  using listener_type = stream_listener<accept_handler<subclass_type>>;
+  accept_handler() : event_handler(static_cast<io_events>(IO_IN | IO_ET)) {}
+
+  void on_added(io_loop &loop,
+                const std::shared_ptr<async_descriptor> &fd_ptr) override {
+
+    auto &listener = static_cast<listener_type &>(*fd_ptr);
+    listener.listen();
+  }
+
+  void on_io(io_loop &loop, const std::shared_ptr<async_descriptor> &fd_ptr,
+             bool read, bool write) override {
+
+    if (read) {
+      auto &listener = static_cast<listener_type &>(*fd_ptr);
+      auto accept_buffer = listener.accept(false);
+      for (const auto &connection : accept_buffer) {
+        static_cast<subclass_type *>(this)->on_accept(loop, fd_ptr, connection);
+      }
+    }
+  }
+};
+
+template <typename connection_handler_type>
+struct default_accept_handler
+    : public accept_handler<default_accept_handler, connection_handler_type> {
+  void on_accept(io_loop &loop,
+                 const std::shared_ptr<async_descriptor> &listener_ptr,
+                 const std::shared_ptr<async_descriptor> &connection_ptr) {
+    loop.request_add(connection_ptr);
+  }
+};
+
+using template <connection_handler_type>
+default_stream_listener =
+    stream_listener<default_accept_handler<connection_handler_type>>;
+
+} // namespace rocket
 
 #endif //ROCKET_SOCKET_HPP
