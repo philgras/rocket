@@ -66,11 +66,10 @@ public:
   void on_io(io_loop &loop, const std::shared_ptr<async_descriptor> &fd,
              bool read, bool write) override {
     if (read) {
-      auto &notifier_ptr = static_cast<notify_descriptor &>(*fd);
+      auto &notifier = static_cast<notify_descriptor &>(*fd);
       uint64_t message;
-      if (notifier_ptr.read(&message)) {
-        static_cast<subclass_type *>(this)->on_notification(loop, notifier_ptr,
-                                                            message);
+      if (notifier.read(&message)) {
+        static_cast<subclass_type *>(this)->on_notification(loop, fd, message);
       }
     }
   }

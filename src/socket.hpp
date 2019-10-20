@@ -3,12 +3,14 @@
 
 #include "event.hpp"
 #include "file_descriptor.hpp"
-#include "io_loop.hpp"
+#include "loop.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <system_error>
+#include <type_traits>
 #include <vector>
 
 #include <sys/types.h>
@@ -87,6 +89,7 @@ private:
   struct addrinfo *m_res;
 };
 
+// TODO implement shutdown of read and write channels
 template <typename handler_type>
 class socket_descriptor : public async_descriptor {
 
@@ -279,7 +282,8 @@ template <typename subclass_type, typename connection_handler_type>
 class accept_handler : public event_handler {
 public:
   using connection_type = stream_connection<connection_handler_type>;
-  using listener_type = stream_listener<accept_handler<subclass_type>>;
+  using listener_type =
+      stream_listener<accept_handler<subclass_type, connection_handler_type>>;
   accept_handler() : event_handler(static_cast<io_events>(IO_IN | IO_ET)) {}
 
   void on_added(io_loop &loop,
@@ -304,7 +308,8 @@ public:
 
 template <typename connection_handler_type>
 struct default_accept_handler
-    : public accept_handler<default_accept_handler, connection_handler_type> {
+    : public accept_handler<default_accept_handler<connection_handler_type>,
+                            connection_handler_type> {
   void on_accept(io_loop &loop,
                  const std::shared_ptr<async_descriptor> &listener_ptr,
                  const std::shared_ptr<async_descriptor> &connection_ptr) {
@@ -312,10 +317,292 @@ struct default_accept_handler
   }
 };
 
-using template <connection_handler_type>
-default_stream_listener =
+template <typename connection_handler_type>
+using default_stream_listener =
     stream_listener<default_accept_handler<connection_handler_type>>;
 
-} // namespace rocket
+template <typename subclass, typename protocol, std::size_t buffer_size>
+class connection_handler : public event_handler {
+public:
+  using server_message = typename protocol::server_message_type;
+  using client_message = typename protocol::client_message_type;
+  using parser = typename protocol::parser_type;
+  using connection = stream_connection<subclass>;
 
+
+  connection_handler(bool connect_on_add)
+      : event_handler(
+            static_cast<io_events>(IO_IN | IO_OUT | IO_ET | IO_RDHUP)),
+        m_server_message(), m_client_message(), m_parser(), m_io_buffer(),
+        m_last_end(nullptr), m_content_end(nullptr),
+        m_wait_state(connect_on_add ? WAIT_CONN : NO_WAIT) {}
+
+  void on_added(io_loop &loop,
+                const std::shared_ptr<async_descriptor> &fd_ptr) override {
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    if (m_wait_state == WAIT_CONN && conn.connect()) {
+      this->reset_wait_state();
+      static_cast<subclass *>(this)->on_connect(loop, fd_ptr);
+    } else {
+      static_cast<subclass *>(this)->on_accept(loop, fd_ptr);
+    }
+  }
+
+  void on_io(io_loop &loop, const std::shared_ptr<async_descriptor> &fd_ptr,
+             bool read, bool write) override {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    if (m_wait_state == WAIT_CONN && write) {
+      if (conn.check_connect()) {
+        this->reset_wait_state();
+        subclass_ptr->on_connect(loop, fd_ptr);
+      }
+    } else if (m_wait_state == WAIT_WRITE && write) {
+      if (this->write_request(conn)) {
+        this->reset_wait_state();
+        subclass_ptr->on_message_sent(loop, fd_ptr);
+      }
+    } else if (m_wait_state == WAIT_READ && read) {
+      if (this->read_response(conn)) {
+        this->reset_wait_state();
+        subclass_ptr->on_message_received(loop, fd_ptr);
+      } else if (m_peer_hungup) {
+        // when still waiting for input data but read hung up was detected
+        // the socket will wait until it timeouts
+        loop.request_remove(fd_ptr);
+      }
+    }
+  }
+
+  void on_read_hungup(io_loop &loop,
+                      const std::shared_ptr<async_descriptor> &fd_ptr) {
+    m_peer_hungup = true;
+  }
+
+protected:
+  void reset_wait_state() { m_wait_state = NO_WAIT; }
+
+  bool is_read_hungup() const { return m_peer_hungup; }
+
+  template <typename message_type>
+  bool read_message(connection &conn, message_type &message) {
+    bool finished = false;
+    while (!finished) {
+      m_last_end = conn.read(m_io_buffer.begin(), m_io_buffer.end());
+      if (m_last_end == nullptr) {
+        m_peer_hungup = true;
+        m_wait_state = WAIT_READ;
+        break;
+      } else if (m_last_end == m_io_buffer.cbegin()) {
+        m_wait_state = WAIT_READ;
+        break;
+      } else {
+        finished = m_parser.parse(message, m_io_buffer.cend(), m_last_end);
+      }
+    }
+    return finished;
+  }
+
+  template <typename message_type>
+  bool write_message(connection &conn, message_type &message) {
+    bool finished = false;
+
+    // first continue writing when previous write has been set to wait
+    if (m_last_end != m_io_buffer.cend()) {
+      m_last_end = conn.write(m_last_end, m_content_end);
+      if (m_last_end != m_content_end)
+        m_wait_state = WAIT_WRITE;
+        return finished;
+    }
+
+    // stream the message
+    while ((finished = message.stream_finished())) {
+      m_content_end = message.stream(m_io_buffer.begin(), m_io_buffer.end());
+      m_last_end = conn.write(m_io_buffer.begin(), m_content_end());
+      if (m_last_end != m_content_end) {
+        break;
+      }
+    }
+    if (finished) {
+      m_wait_state = WAIT_WRITE;
+    }
+    return finished;
+  }
+
+  server_message m_server_message;
+  client_message m_client_message;
+  parser m_parser;
+
+private:
+  enum wait_state {
+    WAIT_CONN = 1,
+    WAIT_READ = 1 << 1,
+    WAIT_WRITE = 1 << 2,
+    NO_WAIT = 1 << 3
+  };
+
+  std::array<char, buffer_size> m_io_buffer;
+  char *m_last_end;
+  char *m_content_end;
+  bool m_peer_hungup;
+  wait_state m_wait_state;
+};
+
+template <typename subclass, typename protocol, std::size_t buffer_size = 1024>
+class client_handler
+    : public connection_handler<subclass, protocol, buffer_size> {
+public:
+  client_handler()
+      : connection_handler<subclass, protocol, buffer_size>(true),
+        m_shutdown_requested(false) {}
+
+  void on_connect(io_loop &loop,
+                  const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    subclass_ptr->on_connect(m_client_message);
+    this->lifecycle(loop, fd_ptr);
+  }
+
+  void on_message_received(io_loop &loop,
+                           const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    subclass_ptr->on_response(m_server_message, m_client_message);
+    this->lifecycle(loop, fd_ptr);
+  }
+
+  void on_message_sent(io_loop &loop,
+                       const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    if (conn.read_message(conn, m_server_message)) {
+      subclass_ptr->on_response(m_server_message, m_client_message);
+      this->lifecycle(loop, fd_ptr);
+    } else if (this->is_read_hungup()) {
+      loop.request_remove(fd_ptr);
+    }
+  }
+
+protected:
+  void shutdown() { m_shutdown_requested = true; }
+
+private:
+  void lifecycle(io_loop &loop,
+                 const std::shared_ptr<async_descriptor> &fd_ptr) {
+    while (true) {
+      if (m_shutdown_requested) {
+        // Directly after a callback invokation, it must be checked
+        // if shutdown was called. If so, close socket.
+        loop.request_remove(fd_ptr);
+      }
+      if (!this->is_read_hungup() &&
+          conn.write_message(conn, m_client_message)) {
+        // if the read channel is not hung up it is reasonable to write,
+        // because an answer is expected. If the message can e written
+        // rigth away, start reading
+        if (conn.read_message(conn, m_server_message)) {
+          // if the message can be read completely, continue with
+          // processing it and start the loop again
+          sublass_ptr->on_response(m_server_message, m_client_message);
+          continue;
+        } else if (this->is_read_hungup()) {
+          // otherwise check if the reading could not be completed
+          // due to a read hungup. As we need to read more to obtain
+          // a message object, which is not going to happen, we are
+          // lost. Thus, close the connection.
+          loop.request_remove(fd_ptr);
+        }
+      }
+      break;
+    }
+  }
+
+  bool m_shutdown_requested;
+};
+
+template <typename subclass, typename protocol, std::size_t buffer_size = 1024>
+class server_handler
+    : public connection_handler<subclass, protocol, buffer_size> {
+public:
+  server_handler()
+      : connection_handler<subclass, protocol, buffer_size>(false),
+        m_shutdown_requested(false) {}
+
+  void on_accept(io_loop &loop,
+                 const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    if (conn.read_message(conn, m_client_message)) {
+      subclass_ptr->on_request(m_client_message, m_server_message);
+      this->lifecycle(loop, fd_ptr);
+    } else if (this->is_read_hungup()) {
+      loop.request_remove(fd_ptr);
+    }
+  }
+
+  void on_message_received(io_loop &loop,
+                           const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    subclass_ptr->on_request(m_client_message, m_server_message);
+    this->lifecycle(loop, fd_ptr);
+  }
+
+  void on_message_sent(io_loop &loop,
+                       const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+    auto &conn = static_cast<connection &>(*fd_ptr);
+    auto subclass_ptr = static_cast<subclass *>(this);
+    if (!this->is_read_hungup() && conn.read_message(conn, m_client_message)) {
+      subclass_ptr->on_request(m_client_message, m_server_message);
+      this->lifecycle(loop, fd_ptr);
+    } else if (this->is_read_hungup()) {
+      loop.request_remove(fd_ptr);
+    }
+  }
+
+protected:
+  void shutdown() { m_shutdown_requested = true; }
+
+private:
+  void lifecycle(io_loop &loop,
+                 const std::shared_ptr<async_descriptor> &fd_ptr) {
+    while (true) {
+      if (m_shutdown_requested) {
+        // Directly after a callback invokation, it must be checked
+        // if shutdown was called. If so, close socket.
+        loop.request_remove(fd_ptr);
+      }
+      if (conn.write_message(conn, m_server_message)) {
+        // send even if the read channel is hung up because, the client
+        // expects only the response and you expect no further requests
+        if (!this->is_read_hungup() &&
+            conn.read_message(conn, m_client_message)) {
+          // if no read hungups were detected before and the message can be
+          // read completely, continue with processing it and start the loop
+          // again
+          sublass_ptr->on_request(m_client_message, m_server_message);
+          continue;
+        } else if (this->is_read_hungup()) {
+          // otherwise check if the reading task could not be completed
+          // due to a read hungup. As we need to read more to obtain
+          // a message object, which is not going to happen, we are
+          // lost. Thus, close the connection.
+          loop.request_remove(fd_ptr);
+        }
+      }
+      break;
+    }
+  }
+
+  bool m_shutdown_requested;
+};
+} // namespace rocket
 #endif //ROCKET_SOCKET_HPP

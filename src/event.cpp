@@ -33,12 +33,12 @@ void event_handler::on_io_events(io_loop &loop,
     this->on_hungup(loop, fd);
     return;
   }
+  if (events & IO_RDHUP) {
+    this->on_read_hungup(loop, fd);
+  }
   if (events & IO_IN || events & IO_OUT) {
     this->on_io(loop, fd, (events & IO_IN) == IO_IN,
                 (events & IO_OUT) == IO_OUT);
-  }
-  if (events & IO_RDHUP) {
-    this->on_read_hungup(loop, fd);
   }
 }
 
