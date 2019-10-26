@@ -327,14 +327,14 @@ public:
   using server_message = typename protocol::server_message_type;
   using client_message = typename protocol::client_message_type;
   using parser = typename protocol::parser_type;
+  using stream = typename protocol::stream_type;
   using connection = stream_connection<subclass>;
-
 
   connection_handler(bool connect_on_add)
       : event_handler(
             static_cast<io_events>(IO_IN | IO_OUT | IO_ET | IO_RDHUP)),
-        m_server_message(), m_client_message(), m_parser(), m_io_buffer(),
-        m_last_end(nullptr), m_content_end(nullptr),
+        m_server_message(), m_client_message(), m_parser(), m_stream(),
+        m_io_buffer(), m_last_end(nullptr), m_content_end(nullptr),
         m_wait_state(connect_on_add ? WAIT_CONN : NO_WAIT) {}
 
   void on_added(io_loop &loop,
@@ -359,13 +359,11 @@ public:
         subclass_ptr->on_connect(loop, fd_ptr);
       }
     } else if (m_wait_state == WAIT_WRITE && write) {
-      if (this->write_request(conn)) {
-        this->reset_wait_state();
+      if (this->write_loop(conn)) {
         subclass_ptr->on_message_sent(loop, fd_ptr);
       }
     } else if (m_wait_state == WAIT_READ && read) {
-      if (this->read_response(conn)) {
-        this->reset_wait_state();
+      if (this->read_loop(conn)) {
         subclass_ptr->on_message_received(loop, fd_ptr);
       } else if (m_peer_hungup) {
         // when still waiting for input data but read hung up was detected
@@ -381,58 +379,29 @@ public:
   }
 
 protected:
-  void reset_wait_state() { m_wait_state = NO_WAIT; }
 
   bool is_read_hungup() const { return m_peer_hungup; }
 
   template <typename message_type>
   bool read_message(connection &conn, message_type &message) {
-    bool finished = false;
-    while (!finished) {
-      m_last_end = conn.read(m_io_buffer.begin(), m_io_buffer.end());
-      if (m_last_end == nullptr) {
-        m_peer_hungup = true;
-        m_wait_state = WAIT_READ;
-        break;
-      } else if (m_last_end == m_io_buffer.cbegin()) {
-        m_wait_state = WAIT_READ;
-        break;
-      } else {
-        finished = m_parser.parse(message, m_io_buffer.cend(), m_last_end);
-      }
-    }
-    return finished;
+
+    m_parser.start(message);
+    m_last_end = m_content_end = m_io_buffer.begin();
+    return this->read_loop(conn);
   }
 
   template <typename message_type>
-  bool write_message(connection &conn, message_type &message) {
-    bool finished = false;
+  bool write_message(connection &conn, const message_type &message) {
 
-    // first continue writing when previous write has been set to wait
-    if (m_last_end != m_io_buffer.cend()) {
-      m_last_end = conn.write(m_last_end, m_content_end);
-      if (m_last_end != m_content_end)
-        m_wait_state = WAIT_WRITE;
-        return finished;
-    }
-
-    // stream the message
-    while ((finished = message.stream_finished())) {
-      m_content_end = message.stream(m_io_buffer.begin(), m_io_buffer.end());
-      m_last_end = conn.write(m_io_buffer.begin(), m_content_end());
-      if (m_last_end != m_content_end) {
-        break;
-      }
-    }
-    if (finished) {
-      m_wait_state = WAIT_WRITE;
-    }
-    return finished;
+    m_stream.start(message);
+    m_last_end = m_content_end = m_io_buffer.begin();
+    return this->write_loop(conn);
   }
 
   server_message m_server_message;
   client_message m_client_message;
   parser m_parser;
+  stream m_stream;
 
 private:
   enum wait_state {
@@ -441,6 +410,48 @@ private:
     WAIT_WRITE = 1 << 2,
     NO_WAIT = 1 << 3
   };
+
+  bool read_loop(connection &conn) {
+    bool finished = false;
+
+    while (!(finished = m_parser.done())) {
+      m_last_end = conn.read(m_io_buffer.begin(), m_io_buffer.end());
+      if (m_last_end == nullptr) {
+        m_peer_hungup = true;
+        break;
+      } else if (m_last_end == m_io_buffer.cbegin()) {
+        break;
+      } else {
+        m_parser.next(m_io_buffer.cend(), m_last_end);
+      }
+    }
+    m_wait_state = finished ? NO_WAIT : WAIT_READ;
+    return finished;
+  }
+
+  bool write_loop(connection &conn) {
+    bool finished = false;
+
+    // first continue writing when previous write has been set to wait
+    if (m_last_end != m_content_end) {
+      m_last_end = conn.write(m_last_end, m_content_end);
+      if (m_last_end != m_content_end) {
+        m_wait_state = WAIT_WRITE;
+        return finished;
+      }
+    }
+    // stream the message
+    while (!(finished = m_stream.done())) {
+      m_content_end = m_stream.next(m_io_buffer.begin(), m_io_buffer.end());
+      m_last_end = conn.write(m_io_buffer.begin(), m_content_end);
+      if (m_last_end != m_content_end) {
+        break;
+      }
+    }
+    m_wait_state = finished ? NO_WAIT : WAIT_WRITE;
+
+    return finished;
+  }
 
   std::array<char, buffer_size> m_io_buffer;
   char *m_last_end;
