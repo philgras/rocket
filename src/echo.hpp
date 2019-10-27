@@ -37,7 +37,7 @@ public:
   }
   void next(const char *begin, const char *end) {
     m_content.append(begin, end);
-    if (*end == '\0') {
+    if (*(end - 1) == '#') {
       std::string tmp;
       std::swap(m_content, tmp);
       m_message->set_content(std::move(tmp));

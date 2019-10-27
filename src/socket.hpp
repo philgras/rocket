@@ -28,7 +28,8 @@ namespace rocket {
 
 class address_iter {
 public:
-  address_iter(const struct addrinfo *addr_ptr) : m_addr_ptr(addr_ptr) {}
+  address_iter(const std::shared_ptr<struct addrinfo> &addr_ptr)
+      : m_resource(addr_ptr), m_addr_ptr(addr_ptr.get()) {}
 
   void next() {
     if (m_addr_ptr) {
@@ -38,9 +39,9 @@ public:
 
   bool has_next() const { return m_addr_ptr != nullptr; }
 
-  const sockaddr *get_sock_addr() const { return m_addr_ptr->ai_addr; }
+  const sockaddr *get_addr() const { return m_addr_ptr->ai_addr; }
 
-  socklen_t get_addr_len() const { return m_addr_ptr->ai_addrlen; }
+  socklen_t get_addrlen() const { return m_addr_ptr->ai_addrlen; }
 
   int get_address_family() const { return m_addr_ptr->ai_family; }
 
@@ -49,7 +50,8 @@ public:
   int get_socktype() const { return m_addr_ptr->ai_socktype; }
 
 private:
-  const struct addrinfo *m_addr_ptr;
+  std::shared_ptr<struct addrinfo> m_resource;
+  struct addrinfo *m_addr_ptr;
 };
 
 class address_info {
@@ -57,9 +59,10 @@ public:
   address_info(const char *hostname, const char *service,
                int address_family = 0, int socket_type = 0,
                int address_protocol = 0, int flags = 0)
-      : m_res(nullptr) {
+      : m_res(nullptr, address_info::free) {
 
     struct addrinfo hints;
+    struct addrinfo *res;
     int rc;
 
     memset(&hints, 0, sizeof(hints));
@@ -68,25 +71,35 @@ public:
     hints.ai_protocol = address_protocol;
     hints.ai_flags = flags;
 
-    rc = ::getaddrinfo(hostname, service, &hints, &m_res);
+    rc = ::getaddrinfo(hostname, service, &hints, &res);
     if (rc != 0) {
       const char *error_str = ::gai_strerror(rc);
       throw std::runtime_error(error_str);
     }
+    m_res.reset(res);
   }
+
+  static address_iter tcp_bind(const char *service,
+                               int address_family = AF_UNSPEC) {
+    auto ainfo = address_info(nullptr, service, address_family, SOCK_STREAM,
+                              IPPROTO_TCP, AI_PASSIVE);
+    return ainfo.iter();
+  }
+
+  static address_iter tcp_connect(const char *host, const char *service,
+                                  int address_family = AF_UNSPEC) {
+    auto ainfo = address_info(host, service, address_family, SOCK_STREAM,
+                              IPPROTO_TCP, 0);
+    return ainfo.iter();
+  }
+
+  ~address_info() = default;
 
   address_iter iter() const { return address_iter(m_res); }
 
-  void free() {
-    if (m_res) {
-      ::freeaddrinfo(m_res);
-    }
-  }
-
-  ~address_info() { free(); }
-
 private:
-  struct addrinfo *m_res;
+  static void free(struct addrinfo *ptr) { ::freeaddrinfo(ptr); }
+  std::shared_ptr<struct addrinfo> m_res;
 };
 
 // TODO implement shutdown of read and write channels
@@ -221,9 +234,9 @@ class stream_listener : public socket_descriptor<handler_type> {
 public:
   using connection_type = typename handler_type::connection_type;
 
-  stream_listener(const sockaddr *addr, socklen_t addr_len, int max_conns,
-                  std::chrono::milliseconds timeout = INFINITE_TIMEOUT,
-                  std::chrono::milliseconds timeout_accepted = INFINITE_TIMEOUT)
+  stream_listener(const sockaddr *addr, socklen_t addr_len, int max_connx,
+                  std::chrono::milliseconds timeout_accepted = INFINITE_TIMEOUT,
+                  std::chrono::milliseconds timeout = INFINITE_TIMEOUT)
       : socket_descriptor<handler_type>(addr->sa_family, SOCK_STREAM,
                                         addr->sa_family, timeout),
         m_max_conns(max_conns), m_timeout_accepted(timeout_accepted) {
@@ -473,6 +486,7 @@ public:
 
     auto &conn = static_cast<connection &>(*fd_ptr);
     auto subclass_ptr = static_cast<subclass *>(this);
+    m_client_message.clear();
     subclass_ptr->on_connect(m_client_message);
     this->lifecycle(loop, fd_ptr);
   }
@@ -481,8 +495,7 @@ public:
                            const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    auto subclass_ptr = static_cast<subclass *>(this);
-    subclass_ptr->on_response(m_server_message, m_client_message);
+    this->response_callback();
     this->lifecycle(loop, fd_ptr);
   }
 
@@ -490,9 +503,8 @@ public:
                        const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    auto subclass_ptr = static_cast<subclass *>(this);
-    if (conn.read_message(conn, m_server_message)) {
-      subclass_ptr->on_response(m_server_message, m_client_message);
+    if (this->read_message(conn, m_server_message)) {
+      this->response_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
       loop.request_remove(fd_ptr);
@@ -512,14 +524,14 @@ private:
         loop.request_remove(fd_ptr);
       }
       if (!this->is_read_hungup() &&
-          conn.write_message(conn, m_client_message)) {
+          this->write_message(conn, m_client_message)) {
         // if the read channel is not hung up it is reasonable to write,
         // because an answer is expected. If the message can e written
         // rigth away, start reading
-        if (conn.read_message(conn, m_server_message)) {
+        if (this->read_message(conn, m_server_message)) {
           // if the message can be read completely, continue with
           // processing it and start the loop again
-          sublass_ptr->on_response(m_server_message, m_client_message);
+          this->response_callback();
           continue;
         } else if (this->is_read_hungup()) {
           // otherwise check if the reading could not be completed
@@ -531,6 +543,13 @@ private:
       }
       break;
     }
+  }
+
+  void response_callback() {
+    auto subclass_ptr = static_cast<subclass *>(this);
+    m_client_message.clear();
+    subclass_ptr->on_response(m_server_message, m_client_message);
+    m_server_message.clear();
   }
 
   bool m_shutdown_requested;
@@ -548,9 +567,8 @@ public:
                  const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    auto subclass_ptr = static_cast<subclass *>(this);
-    if (conn.read_message(conn, m_client_message)) {
-      subclass_ptr->on_request(m_client_message, m_server_message);
+    if (this->read_message(conn, m_client_message)) {
+      this->request_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
       loop.request_remove(fd_ptr);
@@ -561,8 +579,7 @@ public:
                            const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    auto subclass_ptr = static_cast<subclass *>(this);
-    subclass_ptr->on_request(m_client_message, m_server_message);
+    this->request_callback();
     this->lifecycle(loop, fd_ptr);
   }
 
@@ -570,9 +587,8 @@ public:
                        const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    auto subclass_ptr = static_cast<subclass *>(this);
-    if (!this->is_read_hungup() && conn.read_message(conn, m_client_message)) {
-      subclass_ptr->on_request(m_client_message, m_server_message);
+    if (!this->is_read_hungup() && this->read_message(conn, m_client_message)) {
+      this->request_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
       loop.request_remove(fd_ptr);
@@ -591,15 +607,15 @@ private:
         // if shutdown was called. If so, close socket.
         loop.request_remove(fd_ptr);
       }
-      if (conn.write_message(conn, m_server_message)) {
+      if (this->write_message(conn, m_server_message)) {
         // send even if the read channel is hung up because, the client
         // expects only the response and you expect no further requests
         if (!this->is_read_hungup() &&
-            conn.read_message(conn, m_client_message)) {
+            this->read_message(conn, m_client_message)) {
           // if no read hungups were detected before and the message can be
           // read completely, continue with processing it and start the loop
           // again
-          sublass_ptr->on_request(m_client_message, m_server_message);
+          this->request_callback();
           continue;
         } else if (this->is_read_hungup()) {
           // otherwise check if the reading task could not be completed
@@ -611,6 +627,13 @@ private:
       }
       break;
     }
+  }
+
+  void request_callback() {
+    auto subclass_ptr = static_cast<subclass *>(this);
+    m_server_message.clear();
+    sublass_ptr->on_request(m_client_message, m_server_message);
+    m_client_message.clear();
   }
 
   bool m_shutdown_requested;

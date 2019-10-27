@@ -36,3 +36,5 @@ add_library(event src/event.cpp)
 add_executable(event_test test/event_test.cpp)
 target_link_libraries(event_test event loop ${CMAKE_THREAD_LIBS_INIT})
 
+add_executable(echo_test test/echo_test.cpp)
+target_link_libraries(echo_test event loop ${CMAKE_THREAD_LIBS_INIT})
