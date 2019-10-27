@@ -81,15 +81,14 @@ public:
 
   static address_iter tcp_bind(const char *service,
                                int address_family = AF_UNSPEC) {
-    auto ainfo = address_info(nullptr, service, address_family, SOCK_STREAM,
-                              IPPROTO_TCP, AI_PASSIVE);
+    auto ainfo = address_info(nullptr, service, address_family, SOCK_STREAM, 0,
+                              AI_PASSIVE);
     return ainfo.iter();
   }
 
   static address_iter tcp_connect(const char *host, const char *service,
                                   int address_family = AF_UNSPEC) {
-    auto ainfo = address_info(host, service, address_family, SOCK_STREAM,
-                              IPPROTO_TCP, 0);
+    auto ainfo = address_info(host, service, address_family, SOCK_STREAM, 0, 0);
     return ainfo.iter();
   }
 
@@ -151,8 +150,7 @@ public:
     int rc;
     const sockaddr *addr =
         reinterpret_cast<const sockaddr *>(&m_addr_cache->second);
-    WHILE_EINTR(::connect(m_fd, addr, m_addr_cache->first), rc);
-
+    WHILE_EINTR(::connect(this->m_fd, addr, m_addr_cache->first), rc);
     if (rc == -1) {
       if (errno == EINPROGRESS) {
         return false;
@@ -167,10 +165,9 @@ public:
   bool check_connect() {
     int connected;
     socklen_t size = sizeof(connected);
-
-    if (::getsockopt(m_fd, SOL_SOCKET, SO_ERROR, &connected, &size) == -1) {
+    if (::getsockopt(this->m_fd, SOL_SOCKET, SO_ERROR, &connected, &size) ==
+        -1) {
       throw std::system_error(errno, std::system_category());
-
     } else if (connected != 0) {
       if (connected == EINPROGRESS) {
         return false;
@@ -184,8 +181,7 @@ public:
 
   const char *read(char *begin, char *end) {
     int rc;
-    WHILE_EINTR(recv(m_fd, begin, std::distance(begin, end), 0), rc);
-
+    WHILE_EINTR(recv(this->m_fd, begin, std::distance(begin, end), 0), rc);
     if (rc > 0) {
       begin += rc;
     } else if (rc == 0) {
@@ -203,8 +199,7 @@ public:
     int rc;
 
     while (cbegin != cend) {
-      WHILE_EINTR(send(m_fd, cbegin, std::distance(cbegin, cend), 0), rc);
-
+      WHILE_EINTR(send(this->m_fd, cbegin, std::distance(cbegin, cend), 0), rc);
       if (rc >= 0) {
         cbegin += rc;
       } else {
@@ -234,7 +229,7 @@ class stream_listener : public socket_descriptor<handler_type> {
 public:
   using connection_type = typename handler_type::connection_type;
 
-  stream_listener(const sockaddr *addr, socklen_t addr_len, int max_connx,
+  stream_listener(const sockaddr *addr, socklen_t addr_len, int max_conns,
                   std::chrono::milliseconds timeout_accepted = INFINITE_TIMEOUT,
                   std::chrono::milliseconds timeout = INFINITE_TIMEOUT)
       : socket_descriptor<handler_type>(addr->sa_family, SOCK_STREAM,
@@ -242,17 +237,18 @@ public:
         m_max_conns(max_conns), m_timeout_accepted(timeout_accepted) {
 
     int yes = 1;
-    if (::setsockopt(m_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
+    if (::setsockopt(this->m_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) ==
+        -1) {
       throw std::system_error(errno, std::system_category());
     }
 
-    if (::bind(m_fd, addr, addr_len) == -1) {
+    if (::bind(this->m_fd, addr, addr_len) == -1) {
       throw std::system_error(errno, std::system_category());
     }
   }
 
   void listen() {
-    if (::listen(m_fd, m_max_conns) == -1) {
+    if (::listen(this->m_fd, m_max_conns) == -1) {
       throw std::system_error(errno, std::system_category());
     }
   }
@@ -265,10 +261,11 @@ public:
     socklen_t address_len;
 
     do {
-      WHILE_EINTR(::accept4(m_fd, address_ptr, &address_len, SOCK_NONBLOCK),
-                  socket_fd);
+      WHILE_EINTR(
+          ::accept4(this->m_fd, address_ptr, &address_len, SOCK_NONBLOCK),
+          socket_fd);
 
-      if (socket_fd == INVALID_FD) {
+      if (socket_fd == file_descriptor::INVALID_FD) {
         if (errno == ECONNABORTED) {
           continue;
         } else if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -334,27 +331,26 @@ template <typename connection_handler_type>
 using default_stream_listener =
     stream_listener<default_accept_handler<connection_handler_type>>;
 
-template <typename subclass, typename protocol, std::size_t buffer_size>
+template <typename subclass, typename protocol, typename connection>
 class connection_handler : public event_handler {
 public:
   using server_message = typename protocol::server_message_type;
   using client_message = typename protocol::client_message_type;
   using parser = typename protocol::parser_type;
   using stream = typename protocol::stream_type;
-  using connection = stream_connection<subclass>;
 
-  connection_handler(bool connect_on_add)
+  connection_handler(bool connect_on_add, std::size_t buffer_size)
       : event_handler(
             static_cast<io_events>(IO_IN | IO_OUT | IO_ET | IO_RDHUP)),
         m_server_message(), m_client_message(), m_parser(), m_stream(),
-        m_io_buffer(), m_last_end(nullptr), m_content_end(nullptr),
+        m_io_buffer(buffer_size), m_last_end(nullptr), m_content_end(nullptr),
         m_wait_state(connect_on_add ? WAIT_CONN : NO_WAIT) {}
 
   void on_added(io_loop &loop,
                 const std::shared_ptr<async_descriptor> &fd_ptr) override {
     auto &conn = static_cast<connection &>(*fd_ptr);
     if (m_wait_state == WAIT_CONN && conn.connect()) {
-      this->reset_wait_state();
+      m_wait_state = NO_WAIT;
       static_cast<subclass *>(this)->on_connect(loop, fd_ptr);
     } else {
       static_cast<subclass *>(this)->on_accept(loop, fd_ptr);
@@ -368,7 +364,7 @@ public:
     auto subclass_ptr = static_cast<subclass *>(this);
     if (m_wait_state == WAIT_CONN && write) {
       if (conn.check_connect()) {
-        this->reset_wait_state();
+        m_wait_state = NO_WAIT;
         subclass_ptr->on_connect(loop, fd_ptr);
       }
     } else if (m_wait_state == WAIT_WRITE && write) {
@@ -399,7 +395,7 @@ protected:
   bool read_message(connection &conn, message_type &message) {
 
     m_parser.start(message);
-    m_last_end = m_content_end = m_io_buffer.begin();
+    m_last_end = m_content_end = m_io_buffer.data();
     return this->read_loop(conn);
   }
 
@@ -407,7 +403,7 @@ protected:
   bool write_message(connection &conn, const message_type &message) {
 
     m_stream.start(message);
-    m_last_end = m_content_end = m_io_buffer.begin();
+    m_last_end = m_content_end = m_io_buffer.data();
     return this->write_loop(conn);
   }
 
@@ -428,14 +424,16 @@ private:
     bool finished = false;
 
     while (!(finished = m_parser.done())) {
-      m_last_end = conn.read(m_io_buffer.begin(), m_io_buffer.end());
+      char *begin = m_io_buffer.data();
+      char *end = begin + m_io_buffer.size();
+      m_last_end = conn.read(begin, end);
       if (m_last_end == nullptr) {
         m_peer_hungup = true;
         break;
-      } else if (m_last_end == m_io_buffer.cbegin()) {
+      } else if (m_last_end == begin) {
         break;
       } else {
-        m_parser.next(m_io_buffer.cend(), m_last_end);
+        m_parser.next(begin, m_last_end);
       }
     }
     m_wait_state = finished ? NO_WAIT : WAIT_READ;
@@ -455,8 +453,10 @@ private:
     }
     // stream the message
     while (!(finished = m_stream.done())) {
-      m_content_end = m_stream.next(m_io_buffer.begin(), m_io_buffer.end());
-      m_last_end = conn.write(m_io_buffer.begin(), m_content_end);
+      char *begin = m_io_buffer.data();
+      char *end = begin + m_io_buffer.size();
+      m_content_end = m_stream.next(begin, end);
+      m_last_end = conn.write(begin, m_content_end);
       if (m_last_end != m_content_end) {
         break;
       }
@@ -466,35 +466,38 @@ private:
     return finished;
   }
 
-  std::array<char, buffer_size> m_io_buffer;
-  char *m_last_end;
-  char *m_content_end;
+  std::vector<char> m_io_buffer;
+  const char *m_last_end;
+  const char *m_content_end;
   bool m_peer_hungup;
   wait_state m_wait_state;
 };
 
-template <typename subclass, typename protocol, std::size_t buffer_size = 1024>
+template <typename subclass, typename protocol, typename connection>
 class client_handler
-    : public connection_handler<subclass, protocol, buffer_size> {
+    : public connection_handler<client_handler<subclass, protocol, connection>,
+                                protocol, connection> {
 public:
-  client_handler()
-      : connection_handler<subclass, protocol, buffer_size>(true),
+  client_handler(std::size_t buffer_size = 1024)
+      : connection_handler<client_handler<subclass, protocol, connection>,
+                           protocol, connection>(true, buffer_size),
         m_shutdown_requested(false) {}
+
+  void on_accept(io_loop &loop,
+                 const std::shared_ptr<async_descriptor> &fd_ptr) {}
 
   void on_connect(io_loop &loop,
                   const std::shared_ptr<async_descriptor> &fd_ptr) {
 
-    auto &conn = static_cast<connection &>(*fd_ptr);
     auto subclass_ptr = static_cast<subclass *>(this);
-    m_client_message.clear();
-    subclass_ptr->on_connect(m_client_message);
+    this->m_client_message.clear();
+    subclass_ptr->on_connect(this->m_client_message);
     this->lifecycle(loop, fd_ptr);
   }
 
   void on_message_received(io_loop &loop,
                            const std::shared_ptr<async_descriptor> &fd_ptr) {
 
-    auto &conn = static_cast<connection &>(*fd_ptr);
     this->response_callback();
     this->lifecycle(loop, fd_ptr);
   }
@@ -503,7 +506,7 @@ public:
                        const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    if (this->read_message(conn, m_server_message)) {
+    if (this->read_message(conn, this->m_server_message)) {
       this->response_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
@@ -517,6 +520,7 @@ protected:
 private:
   void lifecycle(io_loop &loop,
                  const std::shared_ptr<async_descriptor> &fd_ptr) {
+    auto &conn = static_cast<connection &>(*fd_ptr);
     while (true) {
       if (m_shutdown_requested) {
         // Directly after a callback invokation, it must be checked
@@ -524,11 +528,11 @@ private:
         loop.request_remove(fd_ptr);
       }
       if (!this->is_read_hungup() &&
-          this->write_message(conn, m_client_message)) {
+          this->write_message(conn, this->m_client_message)) {
         // if the read channel is not hung up it is reasonable to write,
         // because an answer is expected. If the message can e written
         // rigth away, start reading
-        if (this->read_message(conn, m_server_message)) {
+        if (this->read_message(conn, this->m_server_message)) {
           // if the message can be read completely, continue with
           // processing it and start the loop again
           this->response_callback();
@@ -547,27 +551,29 @@ private:
 
   void response_callback() {
     auto subclass_ptr = static_cast<subclass *>(this);
-    m_client_message.clear();
-    subclass_ptr->on_response(m_server_message, m_client_message);
-    m_server_message.clear();
+    this->m_client_message.clear();
+    subclass_ptr->on_response(this->m_server_message, this->m_client_message);
+    this->m_server_message.clear();
   }
 
   bool m_shutdown_requested;
 };
 
-template <typename subclass, typename protocol, std::size_t buffer_size = 1024>
+template <typename subclass, typename protocol, typename connection>
 class server_handler
-    : public connection_handler<subclass, protocol, buffer_size> {
+    : public connection_handler<server_handler<subclass, protocol, connection>,
+                                protocol, connection> {
 public:
-  server_handler()
-      : connection_handler<subclass, protocol, buffer_size>(false),
+  server_handler(std::size_t buffer_size = 1024)
+      : connection_handler<server_handler<subclass, protocol, connection>,
+                           protocol, connection>(false, buffer_size),
         m_shutdown_requested(false) {}
 
   void on_accept(io_loop &loop,
                  const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    if (this->read_message(conn, m_client_message)) {
+    if (this->read_message(conn, this->m_client_message)) {
       this->request_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
@@ -575,10 +581,12 @@ public:
     }
   }
 
+  void on_connect(io_loop &loop,
+                  const std::shared_ptr<async_descriptor> &fd_ptr) {}
+
   void on_message_received(io_loop &loop,
                            const std::shared_ptr<async_descriptor> &fd_ptr) {
 
-    auto &conn = static_cast<connection &>(*fd_ptr);
     this->request_callback();
     this->lifecycle(loop, fd_ptr);
   }
@@ -587,7 +595,8 @@ public:
                        const std::shared_ptr<async_descriptor> &fd_ptr) {
 
     auto &conn = static_cast<connection &>(*fd_ptr);
-    if (!this->is_read_hungup() && this->read_message(conn, m_client_message)) {
+    if (!this->is_read_hungup() &&
+        this->read_message(conn, this->m_client_message)) {
       this->request_callback();
       this->lifecycle(loop, fd_ptr);
     } else if (this->is_read_hungup()) {
@@ -601,17 +610,18 @@ protected:
 private:
   void lifecycle(io_loop &loop,
                  const std::shared_ptr<async_descriptor> &fd_ptr) {
+    auto &conn = static_cast<connection &>(*fd_ptr);
     while (true) {
       if (m_shutdown_requested) {
         // Directly after a callback invokation, it must be checked
         // if shutdown was called. If so, close socket.
         loop.request_remove(fd_ptr);
       }
-      if (this->write_message(conn, m_server_message)) {
+      if (this->write_message(conn, this->m_server_message)) {
         // send even if the read channel is hung up because, the client
         // expects only the response and you expect no further requests
         if (!this->is_read_hungup() &&
-            this->read_message(conn, m_client_message)) {
+            this->read_message(conn, this->m_client_message)) {
           // if no read hungups were detected before and the message can be
           // read completely, continue with processing it and start the loop
           // again
@@ -631,9 +641,9 @@ private:
 
   void request_callback() {
     auto subclass_ptr = static_cast<subclass *>(this);
-    m_server_message.clear();
-    sublass_ptr->on_request(m_client_message, m_server_message);
-    m_client_message.clear();
+    this->m_server_message.clear();
+    subclass_ptr->on_request(this->m_client_message, this->m_server_message);
+    this->m_client_message.clear();
   }
 
   bool m_shutdown_requested;

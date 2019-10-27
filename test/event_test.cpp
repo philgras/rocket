@@ -45,7 +45,7 @@ struct test_notificatio_handler
         std::rethrow_exception(e_ptr);
       } catch (const std::exception &e) {
         std::cerr << "Caught exception: " << e.what() << std::endl;
-        loop.request_removal(fd_ptr);
+        loop.request_remove(fd_ptr);
       }
     }
   }

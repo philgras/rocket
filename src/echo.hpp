@@ -14,7 +14,7 @@ public:
   ~echo_message() = default;
 
   template <typename T> void set_content(T &&content) {
-    m_content(std::forward<T>(content));
+    m_content = std::forward<T>(content);
   }
   const std::string &get_content() const { return m_content; }
 
@@ -45,7 +45,7 @@ public:
     }
   }
 
-  bool finished() const { return m_state; }
+  bool done() const { return m_state; }
 
 private:
   echo_message *m_message = nullptr;
@@ -59,7 +59,7 @@ public:
   echo_stream(const echo_stream &) = default;
   ~echo_stream() = default;
 
-  void start(echo_message &message) {
+  void start(const echo_message &message) {
     m_state = false;
     m_begin = message.get_content().cbegin();
     m_end = message.get_content().cend();
@@ -74,7 +74,7 @@ public:
     return last;
   }
 
-  bool finished() const { return m_state; }
+  bool done() const { return m_state; }
 
 private:
   using itertype = typename std::string::const_iterator;

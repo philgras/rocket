@@ -45,8 +45,7 @@ public:
 
   virtual void on_timeout(io_loop &, const std::shared_ptr<async_descriptor> &);
 
-  virtual void on_added(io_loop &,
-                        const std::shared_ptr<async_descriptor> &) = 0;
+  virtual void on_added(io_loop &, const std::shared_ptr<async_descriptor> &){};
 
   virtual void on_removed(io_loop &, const std::shared_ptr<async_descriptor> &);
 
@@ -60,7 +59,7 @@ public:
   virtual void on_hungup(io_loop &, const std::shared_ptr<async_descriptor> &);
 
   virtual void on_read_hungup(io_loop &,
-                              const std::shared_ptr<async_descriptor> &) = 0;
+                              const std::shared_ptr<async_descriptor> &) {}
 
   virtual void on_io(io_loop &, const std::shared_ptr<async_descriptor> &,
                      bool read, bool write) = 0;

@@ -81,7 +81,7 @@ void event_handler::on_exception(io_loop &loop,
 
 void event_handler::on_hungup(io_loop &loop,
                               const std::shared_ptr<async_descriptor> &fd) {
-  loop.request_removal(fd);
+  loop.request_remove(fd);
 }
 
 }
