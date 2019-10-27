@@ -59,7 +59,7 @@ public:
   address_info(const char *hostname, const char *service,
                int address_family = 0, int socket_type = 0,
                int address_protocol = 0, int flags = 0)
-      : m_res(nullptr, address_info::free) {
+      : m_res(nullptr) {
 
     struct addrinfo hints;
     struct addrinfo *res;
@@ -76,19 +76,19 @@ public:
       const char *error_str = ::gai_strerror(rc);
       throw std::runtime_error(error_str);
     }
-    m_res.reset(res);
+    m_res.reset(res, address_info::free);
   }
 
-  static address_iter tcp_bind(const char *service,
+  static address_iter tcp_bind(const char *host, const char *service,
                                int address_family = AF_UNSPEC) {
-    auto ainfo = address_info(nullptr, service, address_family, SOCK_STREAM, 0,
+    auto ainfo = address_info(host, service, address_family, SOCK_STREAM, IPPROTO_TCP,
                               AI_PASSIVE);
     return ainfo.iter();
   }
 
   static address_iter tcp_connect(const char *host, const char *service,
                                   int address_family = AF_UNSPEC) {
-    auto ainfo = address_info(host, service, address_family, SOCK_STREAM, 0, 0);
+    auto ainfo = address_info(host, service, address_family, SOCK_STREAM, IPPROTO_TCP, 0);
     return ainfo.iter();
   }
 
@@ -97,7 +97,9 @@ public:
   address_iter iter() const { return address_iter(m_res); }
 
 private:
-  static void free(struct addrinfo *ptr) { ::freeaddrinfo(ptr); }
+  static void free(struct addrinfo *ptr) {
+      ::freeaddrinfo(ptr);
+  }
   std::shared_ptr<struct addrinfo> m_res;
 };
 
@@ -126,15 +128,15 @@ public:
 template <typename handler_type>
 class stream_connection : public socket_descriptor<handler_type> {
 public:
-  stream_connection(const sockaddr *addr, socklen_t socklen,
+  stream_connection(const address_iter& addr,
                     std::chrono::milliseconds timeout = INFINITE_TIMEOUT)
-      : socket_descriptor<handler_type>(addr->sa_family, SOCK_STREAM,
-                                        addr->sa_family, timeout),
+      : socket_descriptor<handler_type>(addr.get_address_family(), SOCK_STREAM,
+                                        addr.get_protocol(), timeout),
         m_addr_cache() {
 
     m_addr_cache = std::make_unique<std::pair<socklen_t, sockaddr_storage>>();
-    m_addr_cache->first = socklen;
-    std::memcpy(&m_addr_cache->second, addr, socklen);
+    m_addr_cache->first = addr.get_addrlen();
+    std::memcpy(&m_addr_cache->second, addr.get_addr(), addr.get_addrlen());
   }
 
   stream_connection(int fd, const sockaddr *addr, socklen_t socklen,
@@ -229,11 +231,11 @@ class stream_listener : public socket_descriptor<handler_type> {
 public:
   using connection_type = typename handler_type::connection_type;
 
-  stream_listener(const sockaddr *addr, socklen_t addr_len, int max_conns,
+  stream_listener(const address_iter& bind_addr, int max_conns,
                   std::chrono::milliseconds timeout_accepted = INFINITE_TIMEOUT,
                   std::chrono::milliseconds timeout = INFINITE_TIMEOUT)
-      : socket_descriptor<handler_type>(addr->sa_family, SOCK_STREAM,
-                                        addr->sa_family, timeout),
+      : socket_descriptor<handler_type>(bind_addr.get_address_family(), SOCK_STREAM,
+                                        bind_addr.get_protocol(), timeout),
         m_max_conns(max_conns), m_timeout_accepted(timeout_accepted) {
 
     int yes = 1;
@@ -242,7 +244,7 @@ public:
       throw std::system_error(errno, std::system_category());
     }
 
-    if (::bind(this->m_fd, addr, addr_len) == -1) {
+    if (::bind(this->m_fd, bind_addr.get_addr(), bind_addr.get_addrlen()) == -1) {
       throw std::system_error(errno, std::system_category());
     }
   }
@@ -344,7 +346,7 @@ public:
             static_cast<io_events>(IO_IN | IO_OUT | IO_ET | IO_RDHUP)),
         m_server_message(), m_client_message(), m_parser(), m_stream(),
         m_io_buffer(buffer_size), m_last_end(nullptr), m_content_end(nullptr),
-        m_wait_state(connect_on_add ? WAIT_CONN : NO_WAIT) {}
+        m_peer_hungup(false), m_wait_state(connect_on_add ? WAIT_CONN : NO_WAIT) {}
 
   void on_added(io_loop &loop,
                 const std::shared_ptr<async_descriptor> &fd_ptr) override {
@@ -530,8 +532,8 @@ private:
       if (!this->is_read_hungup() &&
           this->write_message(conn, this->m_client_message)) {
         // if the read channel is not hung up it is reasonable to write,
-        // because an answer is expected. If the message can e written
-        // rigth away, start reading
+        // because an answer is expected. If the message can be written
+        // right away, start reading
         if (this->read_message(conn, this->m_server_message)) {
           // if the message can be read completely, continue with
           // processing it and start the loop again

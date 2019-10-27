@@ -1,6 +1,8 @@
 #ifndef ROCKET_ECHO_HPP
 #define ROCKET_ECHO_HPP
 
+#include "socket.hpp"
+
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -90,6 +92,13 @@ struct echo_protocol {
   using parser_type = echo_parser;
   using stream_type = echo_stream;
 };
+
+template <typename subclass>
+using echo_stream_client_handler = client_handler<subclass, echo_protocol, stream_connection<subclass>>;
+
+template <typename subclass>
+using echo_stream_server_handler = server_handler<subclass, echo_protocol, stream_connection<subclass>>;
+
 }
 
 #endif // ROCKET_ECHO_HPP
