@@ -428,14 +428,21 @@ private:
     while (!(finished = m_parser.done())) {
       char *begin = m_io_buffer.data();
       char *end = begin + m_io_buffer.size();
-      m_last_end = conn.read(begin, end);
-      if (m_last_end == nullptr) {
+      m_content_end = conn.read(const_cast<char*>(m_last_end), end);
+      if (m_content_end == nullptr) {
         m_peer_hungup = true;
         break;
-      } else if (m_last_end == begin) {
+      } else if (m_content_end == m_last_end) {
         break;
       } else {
-        m_parser.next(begin, m_last_end);
+        m_last_end = m_parser.next(m_last_end, m_content_end);
+        if (m_last_end != m_content_end) {
+            // if not all bytes were parsed, move the to the
+            // beginning of the buffer
+            m_last_end = std::copy(m_last_end, m_content_end, begin);
+        }else{
+            m_last_end = begin;
+        }
       }
     }
     m_wait_state = finished ? NO_WAIT : WAIT_READ;
@@ -476,12 +483,12 @@ private:
 };
 
 template <typename subclass, typename protocol, typename connection>
-class client_handler
-    : public connection_handler<client_handler<subclass, protocol, connection>,
+class request_handler
+    : public connection_handler<request_handler<subclass, protocol, connection>,
                                 protocol, connection> {
 public:
-  client_handler(std::size_t buffer_size = 1024)
-      : connection_handler<client_handler<subclass, protocol, connection>,
+  request_handler(std::size_t buffer_size = 1024)
+      : connection_handler<request_handler<subclass, protocol, connection>,
                            protocol, connection>(true, buffer_size),
         m_shutdown_requested(false) {}
 
@@ -562,12 +569,12 @@ private:
 };
 
 template <typename subclass, typename protocol, typename connection>
-class server_handler
-    : public connection_handler<server_handler<subclass, protocol, connection>,
+class response_handler
+    : public connection_handler<response_handler<subclass, protocol, connection>,
                                 protocol, connection> {
 public:
-  server_handler(std::size_t buffer_size = 1024)
-      : connection_handler<server_handler<subclass, protocol, connection>,
+  response_handler(std::size_t buffer_size = 1024)
+      : connection_handler<response_handler<subclass, protocol, connection>,
                            protocol, connection>(false, buffer_size),
         m_shutdown_requested(false) {}
 

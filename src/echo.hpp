@@ -37,7 +37,7 @@ public:
     m_message = &message;
     m_content.clear();
   }
-  void next(const char *begin, const char *end) {
+  const char* next(const char *begin, const char *end) {
     m_content.append(begin, end);
     if (*(end - 1) == '#') {
       std::string tmp;
@@ -45,6 +45,7 @@ public:
       m_message->set_content(std::move(tmp));
       m_state = true;
     }
+    return end;
   }
 
   bool done() const { return m_state; }
@@ -94,10 +95,10 @@ struct echo_protocol {
 };
 
 template <typename subclass>
-using echo_stream_client_handler = client_handler<subclass, echo_protocol, stream_connection<subclass>>;
+using echo_request_handler = request_handler<subclass, echo_protocol, stream_connection<subclass>>;
 
 template <typename subclass>
-using echo_stream_server_handler = server_handler<subclass, echo_protocol, stream_connection<subclass>>;
+using echo_response_handler = response_handler<subclass, echo_protocol, stream_connection<subclass>>;
 
 }
 

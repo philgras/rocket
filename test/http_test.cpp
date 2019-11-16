@@ -1,4 +1,4 @@
-#include "echo.hpp"
+#include "http.hpp"
 #include "file_descriptor.hpp"
 #include "loop.hpp"
 #include "socket.hpp"
@@ -9,10 +9,10 @@
 #include <thread>
 
 struct test_client_handler
-        : rocket::echo_request_handler<test_client_handler> {
+        : rocket::echo_stream_client_handler<test_client_handler> {
 
     test_client_handler()
-            : rocket::echo_request_handler<test_client_handler>(20) {}
+            : rocket::echo_stream_client_handler<test_client_handler>(20) {}
 
     void on_connect(rocket::echo_message &request) { this->say_hello(request); }
 
@@ -39,10 +39,10 @@ struct test_client_handler
 };
 
 struct test_server_handler
-        : rocket::echo_response_handler<test_server_handler> {
+        : rocket::echo_stream_server_handler<test_server_handler> {
 
     test_server_handler()
-            : rocket::echo_response_handler<test_server_handler>(1000) {}
+            : rocket::echo_stream_server_handler<test_server_handler>(1000) {}
 
     void on_request(const rocket::echo_message &request,
                     rocket::echo_message &response) {
@@ -72,3 +72,5 @@ int main(int nargs, char **vargs) {
     loop.request_shutdown();
     thread.join();
 }
+
+
