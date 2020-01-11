@@ -67,7 +67,7 @@ void event_handler::on_exception(io_loop &loop,
       std::rethrow_exception(e_ptr);
     } catch (const std::system_error &err) {
       // TODO handle out of memory system errors here
-      std::cerr << "Caught exception when handling descriptor " << fd->get_fd()
+      std::cerr << "Caught system exception when handling descriptor " << fd->get_fd()
                 << ": " << err.what() << std::endl;
     } catch (const std::bad_alloc &err) {
       throw err;

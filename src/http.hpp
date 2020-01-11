@@ -514,11 +514,212 @@ namespace rocket {
     };
 
 
-    template<typename subclass>
-    using http_request_handler = request_handler<subclass, http_protocol, stream_connection<subclass>>;
+template<typename subclass>
+class http_handler : public connection_handler<http_handler<subclass>>{
 
-    template<typename subclass>
-    using http_response_handler = response_handler<subclass, http_protocol, stream_connection<subclass>>;
+protected:
+    void on_connect(stream_connection& conn){
+        auto subclass_ptr = static_cast<subclass *>(this);
+        m_request.clear();
+        subclass_ptr->on_connect(m_request);
+        this->lifecycle();
+    }
+
+    void on_accept(stream_connection& conn){
+
+        this->lifecycle();
+    }
+
+    void on_sent(stream_connection& conn){
+
+    }
+
+    void on_received(stream_connection& conn, std::vector<char>& buffer, size_t len){
+
+    }
+
+private:
+    http_response m_response;
+    http_request m_request;
+    http_parser m_parser;
+    http_stream m_stream;
+
+};
+
+    template <typename subclass, typename protocol, typename connection>
+    class request_handler
+            : public connection_handler<request_handler<subclass, protocol, connection>,
+                    protocol, connection> {
+    public:
+        request_handler(std::size_t buffer_size = 1024)
+                : connection_handler<request_handler<subclass, protocol, connection>,
+                protocol, connection>(true, buffer_size),
+                  m_shutdown_requested(false) {}
+
+        void on_accept() {}
+
+        void on_connect() {
+
+            auto subclass_ptr = static_cast<subclass *>(this);
+            this->m_client_message.clear();
+            subclass_ptr->on_connect(this->m_client_message);
+            this->lifecycle(loop, fd_ptr);
+        }
+
+        void on_message_received(io_loop &loop,
+                                 const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+            this->response_callback();
+            this->lifecycle(loop, fd_ptr);
+        }
+
+        void on_message_sent(io_loop &loop,
+                             const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+            auto &conn = static_cast<connection &>(*fd_ptr);
+            if (this->read_message(conn, this->m_server_message)) {
+                this->response_callback();
+                this->lifecycle(loop, fd_ptr);
+            } else if (this->is_read_hungup()) {
+                loop.request_remove(fd_ptr);
+            }
+        }
+
+    protected:
+        void shutdown() { m_shutdown_requested = true; }
+
+    private:
+        void lifecycle(io_loop &loop,
+                       const std::shared_ptr<async_descriptor> &fd_ptr) {
+            auto &conn = static_cast<connection &>(*fd_ptr);
+            while (true) {
+                if (m_shutdown_requested) {
+                    // Directly after a callback invokation, it must be checked
+                    // if shutdown was called. If so, close socket.
+                    loop.request_remove(fd_ptr);
+                }
+                if (!this->is_read_hungup() &&
+                    this->write_message(conn, this->m_client_message)) {
+                    // if the read channel is not hung up it is reasonable to write,
+                    // because an answer is expected. If the message can be written
+                    // right away, start reading
+                    if (this->read_message(conn, this->m_server_message)) {
+                        // if the message can be read completely, continue with
+                        // processing it and start the loop again
+                        this->response_callback();
+                        continue;
+                    } else if (this->is_read_hungup()) {
+                        // otherwise check if the reading could not be completed
+                        // due to a read hungup. As we need to read more to obtain
+                        // a message object, which is not going to happen, we are
+                        // lost. Thus, close the connection.
+                        loop.request_remove(fd_ptr);
+                    }
+                }
+                break;
+            }
+        }
+
+        void response_callback() {
+            auto subclass_ptr = static_cast<subclass *>(this);
+            this->m_client_message.clear();
+            subclass_ptr->on_response(this->m_server_message, this->m_client_message);
+            this->m_server_message.clear();
+        }
+
+        bool m_shutdown_requested;
+    };
+
+    template <typename subclass, typename protocol, typename connection>
+    class response_handler
+            : public connection_handler<response_handler<subclass, protocol, connection>,
+                    protocol, connection> {
+    public:
+        response_handler(std::size_t buffer_size = 1024)
+                : connection_handler<response_handler<subclass, protocol, connection>,
+                protocol, connection>(false, buffer_size),
+                  m_shutdown_requested(false) {}
+
+        void on_accept(io_loop &loop,
+                       const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+            auto &conn = static_cast<connection &>(*fd_ptr);
+            if (this->read_message(conn, this->m_client_message)) {
+                this->request_callback();
+                this->lifecycle(loop, fd_ptr);
+            } else if (this->is_read_hungup()) {
+                loop.request_remove(fd_ptr);
+            }
+        }
+
+        void on_connect(io_loop &loop,
+                        const std::shared_ptr<async_descriptor> &fd_ptr) {}
+
+        void on_message_received(io_loop &loop,
+                                 const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+            this->request_callback();
+            this->lifecycle(loop, fd_ptr);
+        }
+
+        void on_message_sent(io_loop &loop,
+                             const std::shared_ptr<async_descriptor> &fd_ptr) {
+
+            auto &conn = static_cast<connection &>(*fd_ptr);
+            if (!this->is_read_hungup() &&
+                this->read_message(conn, this->m_client_message)) {
+                this->request_callback();
+                this->lifecycle(loop, fd_ptr);
+            } else if (this->is_read_hungup()) {
+                loop.request_remove(fd_ptr);
+            }
+        }
+
+    protected:
+        void shutdown() { m_shutdown_requested = true; }
+
+    private:
+        void lifecycle(io_loop &loop,
+                       const std::shared_ptr<async_descriptor> &fd_ptr) {
+            auto &conn = static_cast<connection &>(*fd_ptr);
+            while (true) {
+                if (m_shutdown_requested) {
+                    // Directly after a callback invokation, it must be checked
+                    // if shutdown was called. If so, close socket.
+                    loop.request_remove(fd_ptr);
+                }
+                if (this->write_message(conn, this->m_server_message)) {
+                    // send even if the read channel is hung up because, the client
+                    // expects only the response and you expect no further requests
+                    if (!this->is_read_hungup() &&
+                        this->read_message(conn, this->m_client_message)) {
+                        // if no read hungups were detected before and the message can be
+                        // read completely, continue with processing it and start the loop
+                        // again
+                        this->request_callback();
+                        continue;
+                    } else if (this->is_read_hungup()) {
+                        // otherwise check if the reading task could not be completed
+                        // due to a read hungup. As we need to read more to obtain
+                        // a message object, which is not going to happen, we are
+                        // lost. Thus, close the connection.
+                        loop.request_remove(fd_ptr);
+                    }
+                }
+                break;
+            }
+        }
+
+        void request_callback() {
+            auto subclass_ptr = static_cast<subclass *>(this);
+            this->m_server_message.clear();
+            subclass_ptr->on_request(this->m_client_message, this->m_server_message);
+            this->m_client_message.clear();
+        }
+
+        bool m_shutdown_requested;
+    };
+
 
 }
 

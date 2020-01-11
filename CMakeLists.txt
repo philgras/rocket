@@ -31,6 +31,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(src)
 include_directories(lib)
+include_directories("/usr/include/botan-2")
 
 add_library(loop src/loop.cpp)
 add_library(event src/event.cpp)

@@ -2,6 +2,7 @@
 #include "file_descriptor.hpp"
 #include "loop.hpp"
 #include "socket.hpp"
+#include "tls_handler.hpp"
 
 #include <chrono>
 #include <exception>
